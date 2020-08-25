@@ -1,5 +1,6 @@
 package me.jellysquid.mods.phosphor.mixin.chunk.light;
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import me.jellysquid.mods.phosphor.common.chunk.light.SharedNibbleArrayMap;
 import me.jellysquid.mods.phosphor.common.util.collections.DoubleBufferedLong2ObjectHashMap;
 import net.minecraft.world.chunk.ChunkNibbleArray;
@@ -23,8 +24,16 @@ public abstract class MixinChunkToNibbleArrayMap implements SharedNibbleArrayMap
     @Shadow
     public abstract void clearCache();
 
-    private DoubleBufferedLong2ObjectHashMap<ChunkNibbleArray> queue;
+    @Shadow
+    @Final
+    protected Long2ObjectOpenHashMap<ChunkNibbleArray> arrays;
+
+    protected DoubleBufferedLong2ObjectHashMap<ChunkNibbleArray> queue;
     private boolean isShared;
+
+    // Indicates whether or not the extended data structures have been initialized
+    @Unique
+    protected boolean init;
 
     /**
      * @reason Allow shared access, avoid copying
@@ -135,13 +144,8 @@ public abstract class MixinChunkToNibbleArrayMap implements SharedNibbleArrayMap
     }
 
     @Override
-    public DoubleBufferedLong2ObjectHashMap<ChunkNibbleArray> getUpdateQueue() {
-        return this.queue;
-    }
-
-    @Override
-    public void makeSharedCopy(SharedNibbleArrayMap map) {
-        this.queue = map.getUpdateQueue();
+    public void makeSharedCopy(DoubleBufferedLong2ObjectHashMap<ChunkNibbleArray> queue) {
+        this.queue = queue;
         this.isShared = this.queue != null;
 
         if (this.isShared) {
@@ -149,12 +153,18 @@ public abstract class MixinChunkToNibbleArrayMap implements SharedNibbleArrayMap
         }
     }
 
-    @Override
-    public void init() {
-        if (this.queue != null) {
+    /**
+     * Initializes the data for this extended chunk array map. This should only be called once with the initialization
+     * of a subtype.
+     * @throws IllegalStateException If the map has already been initialized
+     */
+    @Unique
+    protected void init() {
+        if (this.init) {
             throw new IllegalStateException("Map already initialized");
         }
 
         this.queue = new DoubleBufferedLong2ObjectHashMap<>();
+        this.init = true;
     }
 }
