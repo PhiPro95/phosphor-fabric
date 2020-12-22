@@ -1,6 +1,5 @@
 package me.jellysquid.mods.phosphor.mixin.chunk.light;
 
-import me.jellysquid.mods.phosphor.common.chunk.level.LevelPropagatorExtended;
 import me.jellysquid.mods.phosphor.common.chunk.light.LightProviderBlockAccess;
 import me.jellysquid.mods.phosphor.common.chunk.light.LightStorageAccess;
 import me.jellysquid.mods.phosphor.common.util.LightUtil;
@@ -13,10 +12,7 @@ import net.minecraft.util.math.ChunkSectionPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.shape.VoxelShapes;
-import net.minecraft.world.LightType;
 import net.minecraft.world.chunk.ChunkNibbleArray;
-import net.minecraft.world.chunk.ChunkProvider;
-import net.minecraft.world.chunk.light.ChunkLightProvider;
 import net.minecraft.world.chunk.light.ChunkSkyLightProvider;
 import net.minecraft.world.chunk.light.SkyLightStorage;
 import org.spongepowered.asm.mixin.Final;
@@ -29,8 +25,8 @@ import static net.minecraft.util.math.ChunkSectionPos.getLocalCoord;
 import static net.minecraft.util.math.ChunkSectionPos.getSectionCoord;
 
 @Mixin(ChunkSkyLightProvider.class)
-public abstract class MixinChunkSkyLightProvider extends ChunkLightProvider<SkyLightStorage.Data, SkyLightStorage>
-        implements LevelPropagatorExtended, LightProviderBlockAccess {
+public abstract class MixinChunkSkyLightProvider extends MixinChunkLightProvider<SkyLightStorage.Data, SkyLightStorage>
+        implements LightProviderBlockAccess {
     private static final BlockState AIR_BLOCK = Blocks.AIR.getDefaultState();
 
     @Shadow
@@ -40,10 +36,6 @@ public abstract class MixinChunkSkyLightProvider extends ChunkLightProvider<SkyL
     @Shadow
     @Final
     private static Direction[] DIRECTIONS;
-
-    public MixinChunkSkyLightProvider(ChunkProvider chunkProvider, LightType type, SkyLightStorage lightStorage) {
-        super(chunkProvider, type, lightStorage);
-    }
 
     /**
      * @author JellySquid
@@ -75,7 +67,6 @@ public abstract class MixinChunkSkyLightProvider extends ChunkLightProvider<SkyL
      *
      * @param fromState The re-usable block state at position {@param fromId}
      */
-    @Override
     public int getPropagatedLevel(long fromId, BlockState fromState, long toId, int currentLevel) {
         if (toId == Long.MAX_VALUE) {
             return 15;
@@ -172,7 +163,7 @@ public abstract class MixinChunkSkyLightProvider extends ChunkLightProvider<SkyL
         // Fast-path: Use much simpler logic if we do not need to access adjacent chunks
         if (localX > 0 && localX < 15 && localY > 0 && localY < 15 && localZ > 0 && localZ < 15) {
             for (Direction dir : DIRECTIONS) {
-                this.propagateLevel(id, fromState, BlockPos.asLong(x + dir.getOffsetX(), y + dir.getOffsetY(), z + dir.getOffsetZ()), targetLevel, mergeAsMin);
+                this.propagateLevel(id, BlockPos.asLong(x + dir.getOffsetX(), y + dir.getOffsetY(), z + dir.getOffsetZ()), targetLevel, mergeAsMin);
             }
 
             return;
@@ -195,14 +186,14 @@ public abstract class MixinChunkSkyLightProvider extends ChunkLightProvider<SkyL
         if (chunkY == belowChunkY || this.lightStorage.hasSection(ChunkSectionPosHelper.updateYLong(chunkId, belowChunkY))) {
             // MC-196542: Pass adjacent source position
             BlockState state = chunkY == belowChunkY ? fromState : AIR_BLOCK;
-            this.propagateLevel(BlockPos.asLong(x, belowY + 1, z), state, BlockPos.asLong(x, belowY, z), targetLevel, mergeAsMin);
+            this.propagateLevel(BlockPos.asLong(x, belowY + 1, z), BlockPos.asLong(x, belowY, z), targetLevel, mergeAsMin);
         }
 
         int aboveY = y + 1;
         int aboveChunkY = getSectionCoord(aboveY);
 
         if (chunkY == aboveChunkY || this.lightStorage.hasSection(ChunkSectionPosHelper.updateYLong(chunkId, aboveChunkY))) {
-            this.propagateLevel(id, fromState, BlockPos.asLong(x, aboveY, z), targetLevel, mergeAsMin);
+            this.propagateLevel(id, BlockPos.asLong(x, aboveY, z), targetLevel, mergeAsMin);
         }
 
         for (Direction dir : HORIZONTAL_DIRECTIONS) {
@@ -215,7 +206,7 @@ public abstract class MixinChunkSkyLightProvider extends ChunkLightProvider<SkyL
             boolean isWithinOriginChunk = chunkId == offsetChunkId;
 
             if (isWithinOriginChunk || this.lightStorage.hasSection(offsetChunkId)) {
-                this.propagateLevel(id, fromState, offsetId, targetLevel, mergeAsMin);
+                this.propagateLevel(id, offsetId, targetLevel, mergeAsMin);
             }
 
             if (isWithinOriginChunk) {
@@ -233,7 +224,7 @@ public abstract class MixinChunkSkyLightProvider extends ChunkLightProvider<SkyL
                     offsetId = BlockPos.asLong(adjX, adjY, adjZ);
 
                     // MC-196542: Pass adjacent source position
-                    this.propagateLevel(BlockPos.asLong(x, adjY, z), AIR_BLOCK, offsetId, targetLevel, mergeAsMin);
+                    this.propagateLevel(BlockPos.asLong(x, adjY, z), offsetId, targetLevel, mergeAsMin);
                 }
             }
         }

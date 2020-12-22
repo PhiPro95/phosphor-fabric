@@ -19,11 +19,11 @@ import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.shape.VoxelShapes;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.ChunkNibbleArray;
 import net.minecraft.world.chunk.ChunkProvider;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.ChunkToNibbleArrayMap;
 import net.minecraft.world.chunk.light.ChunkLightProvider;
-import net.minecraft.world.chunk.light.LevelPropagator;
 import net.minecraft.world.chunk.light.LightStorage;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -38,7 +38,8 @@ import java.util.BitSet;
 
 @Mixin(ChunkLightProvider.class)
 public abstract class MixinChunkLightProvider<M extends ChunkToNibbleArrayMap<M>, S extends LightStorage<M>>
-        extends LevelPropagator implements LightProviderUpdateTracker, LightProviderBlockAccess, LightInitializer, LevelUpdateListener, InitialLightingAccess {
+        extends MixinLevelPropagator
+        implements LightProviderUpdateTracker, LightProviderBlockAccess, LightInitializer, LevelUpdateListener, InitialLightingAccess {
     private static final BlockState DEFAULT_STATE = Blocks.AIR.getDefaultState();
     private static final ChunkSection[] EMPTY_SECTION_ARRAY = new ChunkSection[16];
 
@@ -57,10 +58,6 @@ public abstract class MixinChunkLightProvider<M extends ChunkToNibbleArrayMap<M>
 
     private long prevChunkBucketKey = ChunkPos.MARKER;
     private BitSet prevChunkBucketSet;
-
-    protected MixinChunkLightProvider(int levelCount, int expectedLevelSize, int expectedTotalSize) {
-        super(levelCount, expectedLevelSize, expectedTotalSize);
-    }
 
     @Inject(method = "clearChunkCache", at = @At("RETURN"))
     private void onCleanup(CallbackInfo ci) {
@@ -160,8 +157,8 @@ public abstract class MixinChunkLightProvider<M extends ChunkToNibbleArrayMap<M>
 
     @Override
     public void spreadLightInto(long a, long b) {
-        this.updateLevel(a, b, this.getPropagatedLevel(a, b, this.getLevel(a)), false);
-        this.updateLevel(b, a, this.getPropagatedLevel(b, a, this.getLevel(b)), false);
+        this.propagateLevel(a, b, this.getLevel(a), false);
+        this.propagateLevel(b, a, this.getLevel(b), false);
     }
 
     /**
@@ -274,7 +271,13 @@ public abstract class MixinChunkLightProvider<M extends ChunkToNibbleArrayMap<M>
 
     @Shadow
     @Final
-    protected LightStorage<?> lightStorage;
+    protected S lightStorage;
+
+    @Shadow
+    protected abstract int getCurrentLevelFromSection(ChunkNibbleArray section, long blockPos);
+
+    @Shadow
+    protected void resetLevel(long id) {}
 
     /**
      * @author PhiPro
