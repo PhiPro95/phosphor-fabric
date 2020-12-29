@@ -1,6 +1,5 @@
 package me.jellysquid.mods.phosphor.mixin.chunk.light;
 
-import me.jellysquid.mods.phosphor.common.chunk.light.LightProviderBlockAccess;
 import me.jellysquid.mods.phosphor.common.chunk.light.LightStorageAccess;
 import me.jellysquid.mods.phosphor.common.util.LightUtil;
 import me.jellysquid.mods.phosphor.common.util.math.ChunkSectionPosHelper;
@@ -25,8 +24,7 @@ import static net.minecraft.util.math.ChunkSectionPos.getLocalCoord;
 import static net.minecraft.util.math.ChunkSectionPos.getSectionCoord;
 
 @Mixin(ChunkSkyLightProvider.class)
-public abstract class MixinChunkSkyLightProvider extends MixinChunkLightProvider<SkyLightStorage.Data, SkyLightStorage>
-        implements LightProviderBlockAccess {
+public abstract class MixinChunkSkyLightProvider extends MixinChunkLightProvider<SkyLightStorage.Data, SkyLightStorage> {
     private static final BlockState AIR_BLOCK = Blocks.AIR.getDefaultState();
 
     @Shadow

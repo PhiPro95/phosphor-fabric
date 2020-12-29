@@ -14,6 +14,7 @@ import me.jellysquid.mods.phosphor.common.chunk.light.LightProviderUpdateTracker
 import me.jellysquid.mods.phosphor.common.chunk.light.LightStorageAccess;
 import me.jellysquid.mods.phosphor.common.chunk.light.SharedLightStorageAccess;
 import me.jellysquid.mods.phosphor.common.util.chunk.light.EmptyChunkNibbleArray;
+import me.jellysquid.mods.phosphor.common.util.chunk.light.WorldHandleProvider;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkSectionPos;
 import net.minecraft.util.math.Direction;
@@ -40,12 +41,20 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.concurrent.locks.StampedLock;
 
-@SuppressWarnings("OverwriteModifiers")
 @Mixin(LightStorage.class)
-public abstract class MixinLightStorage<M extends ChunkToNibbleArrayMap<M>> extends SectionDistanceLevelPropagator implements SharedLightStorageAccess<M>, LightStorageAccess {
+public abstract class MixinLightStorage<M extends ChunkToNibbleArrayMap<M>> extends SectionDistanceLevelPropagator
+        implements SharedLightStorageAccess<M>, LightStorageAccess, WorldHandleProvider.Callback {
     protected MixinLightStorage() {
         super(0, 0, 0);
     }
+
+    @Unique
+    protected WorldHandleProvider handleProvider;
+
+    @Unique
+    protected int[] notifyFlags;
+    @Unique
+    protected ChunkNibbleArray[] lightmaps;
 
     @Shadow
     @Final
@@ -150,7 +159,8 @@ public abstract class MixinLightStorage<M extends ChunkToNibbleArrayMap<M>> exte
      * @author JellySquid
      */
     @Overwrite
-    public int get(long blockPos) {
+    public int get(final long worldHandle) {
+        final int localPos = this.handleProvider.getLocalPosMaskFromWorldHandle(worldHandle);
         int x = BlockPos.unpackLongX(blockPos);
         int y = BlockPos.unpackLongY(blockPos);
         int z = BlockPos.unpackLongZ(blockPos);
@@ -166,6 +176,11 @@ public abstract class MixinLightStorage<M extends ChunkToNibbleArrayMap<M>> exte
         return array.get(ChunkSectionPos.getLocalCoord(x), ChunkSectionPos.getLocalCoord(y), ChunkSectionPos.getLocalCoord(z));
     }
 
+    @Unique
+    protected int get(final long sectionId, final int localX, final int localY, final int localZ, final ChunkNibbleArray lightmap) {
+        return lightmap.get(localX, localY, localZ);
+    }
+
     /**
      * An extremely important optimization is made here in regards to adding items to the pending notification set. The
      * original implementation attempts to add the coordinate of every chunk which contains a neighboring block position
@@ -178,33 +193,35 @@ public abstract class MixinLightStorage<M extends ChunkToNibbleArrayMap<M>> exte
      * @author JellySquid
      */
     @Overwrite
-    public void set(long blockPos, int value) {
-        int x = BlockPos.unpackLongX(blockPos);
-        int y = BlockPos.unpackLongY(blockPos);
-        int z = BlockPos.unpackLongZ(blockPos);
+    public void set(final long worldHandle, final int value) {
+        final long sectionId = this.handleProvider.getSectionIdFromWorldHandle(worldHandle);
+        final int sectionIndex = this.handleProvider.getSectionIndexFromId(sectionId);
+        final int localPos = this.handleProvider.getLocalPosMaskFromWorldHandle(worldHandle);
 
-        long chunkPos = ChunkSectionPos.asLong(x >> 4, y >> 4, z >> 4);
+        final int x = this.handleProvider.getLocalXFromMask(localPos);
+        final int y = this.handleProvider.getLocalYFromMask(localPos);
+        final int z = this.handleProvider.getLocalZFromMask(localPos);
 
-        final ChunkNibbleArray lightmap = this.getOrAddLightmap(chunkPos);
-        final int oldVal = lightmap.get(x & 15, y & 15, z & 15);
+        ChunkNibbleArray lightmap = this.getOrAddLightmap(sectionId);
+        final int oldVal = this.get(sectionId, x, y, z, lightmap);
 
-        this.beforeLightChange(blockPos, oldVal, value, lightmap);
-        this.changeLightmapComplexity(chunkPos, this.getLightmapComplexityChange(blockPos, oldVal, value, lightmap));
+        this.beforeLightChange(worldHandle, oldVal, value, lightmap);
+        this.changeLightmapComplexity(sectionId, this.getLightmapComplexityChange(worldHandle, oldVal, value, lightmap));
 
-        if (this.dirtySections.add(chunkPos)) {
-            this.storage.replaceWithCopy(chunkPos);
+        final int notifyFlags = this.notifyFlags[sectionIndex];
+
+        if ((notifyFlags & 1) != 0) {
+            lightmap = this.lightmaps[sectionIndex];
+        } else {
+            lightmap = lightmap.copy();
+            this.notifyFlags[sectionIndex] |= 1;
+            this.lightmaps[sectionIndex] = lightmap;
+            this.storage.put(this.handleProvider.getSectionPosFromId(sectionId), lightmap);
         }
 
-        ChunkNibbleArray nibble = this.getLightSection(chunkPos, true);
-        nibble.set(x & 15, y & 15, z & 15, value);
-
-        for (int z2 = (z - 1) >> 4; z2 <= (z + 1) >> 4; ++z2) {
-            for (int x2 = (x - 1) >> 4; x2 <= (x + 1) >> 4; ++x2) {
-                for (int y2 = (y - 1) >> 4; y2 <= (y + 1) >> 4; ++y2) {
-                    this.notifySections.add(ChunkSectionPos.asLong(x2, y2, z2));
-                }
-            }
-        }
+        lightmap.set(x, y, z, value);
+        final int notifyIndex = (x == 0 ? 0 : 1) + (x == 15 ? 1 : 0) + (y == 0 ? 0 : 3) + (y == 15 ? 3 : 0) + (z == 0 ? 0 : 9) + (z == 15 ? 9 : 0);
+        this.notifyFlags[sectionIndex] |= 1 << (notifyIndex + 1);
     }
 
     /**
@@ -553,7 +570,13 @@ public abstract class MixinLightStorage<M extends ChunkToNibbleArrayMap<M>> exte
      * @reason Method completely changed. Allow child mixins to properly extend this.
      */
     @Overwrite
-    public boolean hasSection(final long sectionPos) {
+    public boolean hasSection(final long sectionId) {
+        final int index = this.handleProvider.getSectionIndexFromId(sectionId);
+
+    }
+
+    @Unique
+    protected boolean hasSectionUncached(final long sectionPos) {
         return this.enabledChunks.contains(ChunkSectionPos.withZeroY(sectionPos));
     }
 

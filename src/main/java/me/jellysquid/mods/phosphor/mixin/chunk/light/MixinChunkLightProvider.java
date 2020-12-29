@@ -4,11 +4,9 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import me.jellysquid.mods.phosphor.common.block.BlockStateLightInfo;
 import me.jellysquid.mods.phosphor.common.block.BlockStateLightInfoAccess;
 import me.jellysquid.mods.phosphor.common.chunk.level.LevelUpdateListener;
-import me.jellysquid.mods.phosphor.common.chunk.light.InitialLightingAccess;
-import me.jellysquid.mods.phosphor.common.chunk.light.LightInitializer;
-import me.jellysquid.mods.phosphor.common.chunk.light.LightProviderBlockAccess;
-import me.jellysquid.mods.phosphor.common.chunk.light.LightProviderUpdateTracker;
-import me.jellysquid.mods.phosphor.common.chunk.light.LightStorageAccess;
+import me.jellysquid.mods.phosphor.common.chunk.light.*;
+import me.jellysquid.mods.phosphor.common.util.chunk.light.LightHandleProvider;
+import me.jellysquid.mods.phosphor.common.util.chunk.light.WorldHandleProvider;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
@@ -17,20 +15,21 @@ import net.minecraft.util.math.ChunkSectionPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.shape.VoxelShapes;
-import net.minecraft.world.World;
-import net.minecraft.world.chunk.Chunk;
-import net.minecraft.world.chunk.ChunkNibbleArray;
-import net.minecraft.world.chunk.ChunkProvider;
-import net.minecraft.world.chunk.ChunkSection;
-import net.minecraft.world.chunk.ChunkToNibbleArrayMap;
+import net.minecraft.world.BlockView;
+import net.minecraft.world.EmptyBlockView;
+import net.minecraft.world.chunk.*;
 import net.minecraft.world.chunk.light.ChunkLightProvider;
 import net.minecraft.world.chunk.light.LightStorage;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Mutable;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.Arrays;
@@ -39,9 +38,20 @@ import java.util.BitSet;
 @Mixin(ChunkLightProvider.class)
 public abstract class MixinChunkLightProvider<M extends ChunkToNibbleArrayMap<M>, S extends LightStorage<M>>
         extends MixinLevelPropagator
-        implements LightProviderUpdateTracker, LightProviderBlockAccess, LightInitializer, LevelUpdateListener, InitialLightingAccess {
+        implements LightProviderUpdateTracker, LightInitializer, LevelUpdateListener, InitialLightingAccess, WorldHandleProvider.Callback {
+    @Unique
     private static final BlockState DEFAULT_STATE = Blocks.AIR.getDefaultState();
-    private static final ChunkSection[] EMPTY_SECTION_ARRAY = new ChunkSection[16];
+
+    @Mutable
+    @Final
+    protected WorldHandleProvider handleProvider;
+
+    @Unique
+    private BlockView[] blockViews;
+    @Unique
+    private ChunkSection[] sections;
+    @Unique
+    private BlockState[] states;
 
     @Shadow
     @Final
@@ -51,89 +61,222 @@ public abstract class MixinChunkLightProvider<M extends ChunkToNibbleArrayMap<M>
     @Final
     protected ChunkProvider chunkProvider;
 
-    private final long[] cachedChunkPos = new long[2];
-    private final ChunkSection[][] cachedChunkSections = new ChunkSection[2][];
-
     private final Long2ObjectOpenHashMap<BitSet> buckets = new Long2ObjectOpenHashMap<>();
 
     private long prevChunkBucketKey = ChunkPos.MARKER;
     private BitSet prevChunkBucketSet;
 
-    @Inject(method = "clearChunkCache", at = @At("RETURN"))
-    private void onCleanup(CallbackInfo ci) {
-        // This callback may be executed from the constructor above, and the object won't be initialized then
-        if (this.cachedChunkPos != null) {
-            Arrays.fill(this.cachedChunkPos, ChunkPos.MARKER);
-            Arrays.fill(this.cachedChunkSections, null);
-        }
+    @Inject(
+        method = "<init>",
+        at = @At("TAIL")
+    )
+    private void setHandleProvider(final CallbackInfo ci) {
+        this.handleProvider = this.createHandleProvider();
     }
 
-    // [VanillaCopy] method_20479
     @Override
-    public BlockState getBlockStateForLighting(int x, int y, int z) {
-        if (World.isHeightInvalid(y)) {
-            return DEFAULT_STATE;
+    protected long getTargetHandle(long propagationHandle) {
+        return this.handleProvider.getTargetHandle(propagationHandle);
+    }
+
+    @Override
+    protected long getIdFromHandle(long worldHandle) {
+        return this.handleProvider.getIdFromWorldHandle(worldHandle);
+    }
+
+    @Override
+    protected long createMarkerPropagationHandleForResetLevel(long worldHandle) {
+        return this.handleProvider.getMarkerPropagationHandle();
+    }
+
+    @Override
+    protected long createHandleForId(long worldId) {
+        return this.handleProvider.createWorldHandleForId(worldId);
+    }
+
+    @Override
+    protected void releaseHandle(long worldHandle) {
+        this.handleProvider.releaseWorldHandle(worldHandle);
+    }
+
+    @Override
+    protected void clearHandles() {
+        this.handleProvider.clearWorldHandles();
+    }
+
+    /**
+     * @author PhiPro
+     * @reason
+     */
+    @Overwrite
+    protected boolean isMarker(long worldHandle) {
+        return worldHandle == this.handleProvider.getMarkerWorldHandle();
+    }
+
+    @Redirect(
+        method = "resetLevel(J)V",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/util/math/ChunkSectionPos;fromBlockPos(J)J"
+        )
+    )
+    private long useSectionId(final long worldHandle) {
+        return this.handleProvider.getSectionIdFromWorldHandle(worldHandle);
+    }
+
+    @ModifyArg(
+        method = "checkBlock(Lnet/minecraft/util/math/BlockPos;)V",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/chunk/light/ChunkLightProvider;resetLevel(J)V"
+        ),
+        index = 0
+    )
+    private long useWorldHandleForResetLevel(final long blockpos) {
+        return this.handleProvider.createWorldHandleForBlockPos(blockpos);
+    }
+
+    @Override
+    public void increaseChunkSize(final int chunkSize) {
+        this.blockViews = Arrays.copyOf(this.blockViews, chunkSize);
+    }
+
+    @Override
+    public void increaseSectionSize(final int sectionSize) {
+        this.sections = Arrays.copyOf(this.sections, sectionSize);
+    }
+
+    @Override
+    public void increaseWorldHandlesSize(final int handleSize) {
+        this.states = Arrays.copyOf(this.states, handleSize);
+    }
+
+    @Override
+    public void prepareCacheForChunk(final int chunkIndex, final long chunkId) {
+        final long chunkPos = this.handleProvider.getChunkPosFromId(chunkId);
+        BlockView blockView = this.chunkProvider.getChunk(ChunkSectionPos.unpackX(chunkPos), ChunkSectionPos.unpackZ(chunkPos));
+
+        if (blockView == null) {
+            blockView = EmptyBlockView.INSTANCE;
         }
 
-        final long chunkPos = ChunkPos.toLong(x >> 4, z >> 4);
+        this.blockViews[chunkIndex] = blockView;
+    }
 
-        for (int i = 0; i < 2; i++) {
-            if (this.cachedChunkPos[i] == chunkPos) {
-                return this.getBlockStateFromSection(this.cachedChunkSections[i], x, y, z);
+    @Override
+    public void prepareCacheForSection(final int sectionIndex, final long sectionId) {
+        final BlockView blockView = this.getCachedBlockView(this.handleProvider.getChunkIndexFromSectionId(sectionId));
+        ChunkSection section = null;
+
+        if (blockView != EmptyBlockView.INSTANCE) {
+            final int y = ChunkSectionPos.unpackY(this.handleProvider.getSectionPosFromId(sectionId));
+            final ChunkSection[] sections = ((Chunk) blockView).getSectionArray();
+
+            if (y >= 0 && y < sections.length) {
+                section = sections[y];
             }
         }
 
-        return this.getBlockStateForLightingUncached(x, y, z);
+        this.sections[sectionIndex] = section;
     }
 
-    private BlockState getBlockStateForLightingUncached(int x, int y, int z) {
-        return this.getBlockStateFromSection(this.getAndCacheChunkSections(x >> 4, z >> 4), x, y, z);
+    @Override
+    public void prepareCacheForWorldHandle(final int index, final long worldHandle) {
+        this.states[index] = null;
     }
 
-    private BlockState getBlockStateFromSection(ChunkSection[] sections, int x, int y, int z) {
-        ChunkSection section = sections[y >> 4];
+    @Override
+    public void resetChunkCache(int chunkCount, int expectedChunkCount) {
+        if (this.blockViews == null || this.blockViews.length > expectedChunkCount) {
+            this.blockViews = new BlockView[expectedChunkCount];
+        } else {
+            Arrays.fill(this.blockViews, 0, chunkCount, null);
+        }
+    }
 
-        if (section != null) {
-            return section.getBlockState(x & 15, y & 15, z & 15);
+    @Override
+    public void resetSectionCache(int sectionCount, int expectedSectionCount) {
+        if (this.sections == null || this.sections.length > expectedSectionCount) {
+            this.sections = new ChunkSection[expectedSectionCount];
+        } else {
+            Arrays.fill(this.sections, 0, sectionCount, null);
+        }
+    }
+
+    @Unique
+    protected BlockView getCachedBlockView(final int chunkIndex) {
+        return this.blockViews[chunkIndex];
+    }
+
+    @Unique
+    protected ChunkSection getCachedChunkSection(final int sectionIndex) {
+        return this.sections[sectionIndex];
+    }
+
+    /**
+     * Returns the BlockState which represents the block at the specified coordinates in the world. This may return
+     * a different BlockState than what actually exists at the coordinates (such as if it is out of bounds), but will
+     * always represent a state with valid light properties for that coordinate.
+     */
+    @Unique
+    protected BlockState getCachedBlockState(final long worldHandle) {
+        final int index = this.handleProvider.getIndexFromWorldHandle(worldHandle);
+        BlockState state = this.states[index];
+
+        if (state == null) {
+            state = this.getUncachedBlockState(worldHandle);
+            this.states[index] = state;
         }
 
-        return DEFAULT_STATE;
+        return state;
     }
 
-    private ChunkSection[] getAndCacheChunkSections(int x, int z) {
-        final Chunk chunk = (Chunk) this.chunkProvider.getChunk(x, z);
-        final ChunkSection[] sections = chunk != null ? chunk.getSectionArray() : EMPTY_SECTION_ARRAY;
+    protected BlockState getUncachedBlockState(final long worldHandle) {
+        final ChunkSection section = this.getCachedChunkSection(this.handleProvider.getSectionIndexFromWorldHandle(worldHandle));
 
-        final ChunkSection[][] cachedSections = this.cachedChunkSections;
-        cachedSections[1] = cachedSections[0];
-        cachedSections[0] = sections;
+        if (ChunkSection.isEmpty(section)) {
+            return DEFAULT_STATE;
+        } else {
+            final int localMask = this.handleProvider.getLocalPosMaskFromWorldHandle(worldHandle);
+            final int x = this.handleProvider.getLocalXFromMask(localMask);
+            final int y = this.handleProvider.getLocalYFromMask(localMask);
+            final int z = this.handleProvider.getLocalZFromMask(localMask);
 
-        final long[] cachedCoords = this.cachedChunkPos;
-        cachedCoords[1] = cachedCoords[0];
-        cachedCoords[0] = ChunkPos.toLong(x, z);
-
-        return sections;
+            return section.getBlockState(x, y, z);
+        }
     }
 
     // [VanillaCopy] method_20479
-    @Override
-    public int getSubtractedLight(BlockState state, int x, int y, int z) {
+    /**
+     * Returns the amount of light which is blocked at the specified coordinates by the BlockState.
+     */
+    @Unique
+    protected int getSubtractedLight(final BlockState state, final long worldHandle) {
         BlockStateLightInfo info = ((BlockStateLightInfoAccess) state).getLightInfo();
 
         if (info != null) {
             return info.getLightSubtracted();
         } else {
-            return this.getSubtractedLightFallback(state, x, y, z);
+            return this.getSubtractedLightFallback(state, worldHandle);
         }
     }
 
-    private int getSubtractedLightFallback(BlockState state, int x, int y, int z) {
-        return state.getBlock().getOpacity(state, this.chunkProvider.getWorld(), this.reusableBlockPos.set(x, y, z));
+    @Unique
+    private int getSubtractedLightFallback(final BlockState state, final long worldHandle) {
+        return state.getBlock().getOpacity(
+            state,
+            this.chunkProvider.getWorld(),
+            this.handleProvider.fillBlockPosFromWorldHandle(worldHandle, this.reusableBlockPos)
+        );
     }
 
     // [VanillaCopy] method_20479
-    @Override
-    public VoxelShape getOpaqueShape(BlockState state, int x, int y, int z, Direction dir) {
+    /**
+     * Returns the VoxelShape of a block for lighting without making a second call to
+     * {@link LightProviderBlockAccess#getBlockStateForLighting(int, int, int)}.
+     */
+    @Unique
+    public VoxelShape getOpaqueShape(final BlockState state, final long worldHandle, final Direction dir) {
         if (state != null && state.hasSidedTransparency()) {
             BlockStateLightInfo info = ((BlockStateLightInfoAccess) state).getLightInfo();
 
@@ -144,15 +287,22 @@ public abstract class MixinChunkLightProvider<M extends ChunkToNibbleArrayMap<M>
                     return extrudedFaces[dir.ordinal()];
                 }
             } else {
-                return this.getOpaqueShapeFallback(state, x, y, z, dir);
+                return this.getOpaqueShapeFallback(state, worldHandle, dir);
             }
         }
 
         return VoxelShapes.empty();
     }
 
-    private VoxelShape getOpaqueShapeFallback(BlockState state, int x, int y, int z, Direction dir) {
-        return VoxelShapes.extrudeFace(state.getCullingShape(this.chunkProvider.getWorld(), this.reusableBlockPos.set(x, y, z)), dir);
+    @Unique
+    private VoxelShape getOpaqueShapeFallback(final BlockState state, final long worldHandle, final Direction dir) {
+        return VoxelShapes.extrudeFace(
+            state.getCullingShape(
+                this.chunkProvider.getWorld(),
+                this.handleProvider.fillBlockPosFromWorldHandle(worldHandle, this.reusableBlockPos)
+            ),
+            dir
+        );
     }
 
     @Override

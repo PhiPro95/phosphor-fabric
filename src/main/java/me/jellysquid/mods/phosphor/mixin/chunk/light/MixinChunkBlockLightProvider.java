@@ -1,12 +1,8 @@
 package me.jellysquid.mods.phosphor.mixin.chunk.light;
 
 import me.jellysquid.mods.phosphor.common.chunk.light.BlockLightStorageAccess;
-import me.jellysquid.mods.phosphor.common.chunk.light.LightProviderBlockAccess;
 import me.jellysquid.mods.phosphor.common.util.LightUtil;
-import me.jellysquid.mods.phosphor.common.util.math.DirectionHelper;
 import net.minecraft.block.BlockState;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.ChunkSectionPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.chunk.light.BlockLightStorage;
@@ -15,28 +11,17 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
-
-import static net.minecraft.util.math.ChunkSectionPos.getSectionCoord;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
 
 @Mixin(ChunkBlockLightProvider.class)
-public abstract class MixinChunkBlockLightProvider extends MixinChunkLightProvider<BlockLightStorage.Data, BlockLightStorage>
-        implements LightProviderBlockAccess {
+public abstract class MixinChunkBlockLightProvider extends MixinChunkLightProvider<BlockLightStorage.Data, BlockLightStorage> {
     @Shadow
     protected abstract int getLightSourceLuminance(long blockPos);
 
     @Shadow
     @Final
     private static Direction[] DIRECTIONS;
-
-    /**
-     * @reason Use optimized variant
-     * @author JellySquid
-     */
-    @Override
-    @Overwrite
-    public int getPropagatedLevel(long fromId, long toId, int currentLevel) {
-        return this.getPropagatedLevel(fromId, null, toId, currentLevel);
-    }
 
     /**
      * This breaks up the call to method_20479 into smaller parts so we do not have to pass a mutable heap object
@@ -53,80 +38,121 @@ public abstract class MixinChunkBlockLightProvider extends MixinChunkLightProvid
      * @param fromState The re-usable block state at position {@param fromId}
      * @author JellySquid
      */
-    public int getPropagatedLevel(long fromId, BlockState fromState, long toId, int currentLevel) {
-        if (toId == Long.MAX_VALUE) {
+    public int getPropagatedLevel(final long propagationHandle, final int level) {
+        final long targetHandle = this.handleProvider.getTargetHandle(propagationHandle);
+
+        if (targetHandle == this.handleProvider.getMarkerWorldHandle()) {
             return 15;
-        } else if (fromId == Long.MAX_VALUE && ((BlockLightStorageAccess) this.lightStorage).isLightEnabled(ChunkSectionPos.fromBlockPos(toId))) {
-            // Disable blocklight sources before initial lighting
-            return currentLevel + 15 - this.getLightSourceLuminance(toId);
-        } else if (currentLevel >= 15) {
-            return currentLevel;
         }
 
-        int toX = BlockPos.unpackLongX(toId);
-        int toY = BlockPos.unpackLongY(toId);
-        int toZ = BlockPos.unpackLongZ(toId);
+        final Direction dir = this.handleProvider.getDirection(propagationHandle);
 
-        int fromX = BlockPos.unpackLongX(fromId);
-        int fromY = BlockPos.unpackLongY(fromId);
-        int fromZ = BlockPos.unpackLongZ(fromId);
-
-        Direction dir = DirectionHelper.getVecDirection(toX - fromX, toY - fromY, toZ - fromZ);
-
-        if (dir != null) {
-            BlockState toState = this.getBlockStateForLighting(toX, toY, toZ);
-
-            if (toState == null) {
-                return 15;
+        if (dir == null) {
+            if (((BlockLightStorageAccess) this.lightStorage).isLightEnabled(targetHandle)) {
+                // Disable blocklight sources before initial lighting
+                return level + 15 - this.getLightSourceLuminance(this.handleProvider.getPackedPosFromWorldHandle(targetHandle));
+            } else {
+                return level;
             }
+        }
 
-            int newLevel = this.getSubtractedLight(toState, toX, toY, toZ);
+        if (level >= 15) {
+            return level;
+        }
 
-            if (newLevel >= 15) {
-                return 15;
-            }
+        final BlockState targetState = this.getCachedBlockState(targetHandle);
 
-            if (fromState == null) {
-                fromState = this.getBlockStateForLighting(fromX, fromY, fromZ);
-            }
+        if (targetState == null) {
+            return 15;
+        }
 
-            VoxelShape aShape = this.getOpaqueShape(fromState, fromX, fromY, fromZ, dir);
-            VoxelShape bShape = this.getOpaqueShape(toState, toX, toY, toZ, dir.getOpposite());
+        int newLevel = this.getSubtractedLight(targetState, targetHandle);
 
-            if (!LightUtil.unionCoversFullCube(aShape, bShape)) {
-                return currentLevel + Math.max(1, newLevel);
-            }
+        if (newLevel >= 15) {
+            return 15;
+        }
+
+        final long sourceHandle = this.handleProvider.getSourceHandle(propagationHandle);
+        final BlockState sourceState = this.getCachedBlockState(sourceHandle);
+
+        final VoxelShape aShape = this.getOpaqueShape(sourceState, sourceHandle, dir);
+        final VoxelShape bShape = this.getOpaqueShape(targetState, targetHandle, dir.getOpposite());
+
+        if (!LightUtil.unionCoversFullCube(aShape, bShape)) {
+            return level + Math.max(1, newLevel);
         }
 
         return 15;
     }
 
-    /**
-     * Avoids constantly (un)packing coordinates. This strictly copies vanilla's implementation.
-     * @reason Use faster implementation
-     * @author JellySquid
-     */
     @Override
-    @Overwrite
-    public void propagateLevel(long id, int targetLevel, boolean mergeAsMin) {
-        int x = BlockPos.unpackLongX(id);
-        int y = BlockPos.unpackLongY(id);
-        int z = BlockPos.unpackLongZ(id);
-
-        long chunk = ChunkSectionPos.asLong(getSectionCoord(x), getSectionCoord(y), getSectionCoord(z));
-
-        BlockState state = this.getBlockStateForLighting(x, y, z);
-
+    public void propagateLevel(final long worldHandle, final int level, final boolean increaseLight) {
         for (Direction dir : DIRECTIONS) {
-            int adjX = x + dir.getOffsetX();
-            int adjY = y + dir.getOffsetY();
-            int adjZ = z + dir.getOffsetZ();
+            final long propagationHandle = this.handleProvider.createOutgoingPropagationHandle(worldHandle, dir);
 
-            long adjChunk = ChunkSectionPos.asLong(getSectionCoord(adjX), getSectionCoord(adjY), getSectionCoord(adjZ));
+            if (this.lightStorage.hasSection(this.handleProvider.getTargetHandle(propagationHandle))) {
+                this.propagateLevel(propagationHandle, level, increaseLight);
+            }
 
-            if ((chunk == adjChunk) || this.lightStorage.hasSection(adjChunk)) {
-                this.propagateLevel(id, BlockPos.asLong(adjX, adjY, adjZ), targetLevel, mergeAsMin);
+            this.handleProvider.releaseOutgoingPropagationHandle(propagationHandle);
+        }
+    }
+
+    /**
+     * @author PhiPro
+     * @reason
+     */
+    @Overwrite
+    protected int recalculateLevel(final long worldHandle, final long providedPropagation, final int providedLevel) {
+        int level = providedLevel;
+
+        final boolean isMarkerPropagation = providedPropagation == this.handleProvider.getMarkerPropagationHandle();
+        final Direction providedDir = isMarkerPropagation ? null : this.handleProvider.getOppDirection(providedPropagation);
+
+        if (providedDir != null || isMarkerPropagation) {
+            final long propagationHandle = this.handleProvider.createSelfPropagationHandle(worldHandle);
+            final int propagatedLevel = this.getPropagatedLevel(propagationHandle, 0);
+
+            if (level > propagatedLevel) {
+                level = propagatedLevel;
+            }
+
+            this.handleProvider.releasePropagationHandle(propagationHandle);
+
+            if (level == 0) {
+                return level;
             }
         }
+
+        for(final Direction dir : DIRECTIONS) {
+            if (dir != providedDir) {
+                final long propagationHandle = this.handleProvider.createIncomingPropagationHandle(worldHandle, dir);
+                final int propagatedLevel = this.getPropagatedLevel(propagationHandle, this.getLevel(this.handleProvider.getSourceHandle(propagationHandle)));
+
+                if (level > propagatedLevel) {
+                    level = propagatedLevel;
+                }
+
+                this.handleProvider.releaseIncomingPropagationHandle(propagationHandle);
+
+                if (level == 0) {
+                    return level;
+                }
+            }
+        }
+
+        return level;
+    }
+
+    @Redirect(
+        method = "addLightSource(Lnet/minecraft/util/math/BlockPos;I)V",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/chunk/light/ChunkBlockLightProvider;updateLevel(JJIZ)V"
+        )
+    )
+    private void passPropagationHandleToUpdateLevel(ChunkBlockLightProvider lightProvider, long excluded, long blockpos, int level, boolean decrease) {
+        final long worldHandle = this.handleProvider.createWorldHandleForBlockPos(blockpos);
+        this.updateLevel(this.handleProvider.createSelfPropagationHandle(worldHandle), worldHandle, level, decrease);
     }
 }

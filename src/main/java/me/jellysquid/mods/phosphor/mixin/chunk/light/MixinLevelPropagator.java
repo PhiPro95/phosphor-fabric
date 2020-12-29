@@ -40,6 +40,9 @@ public abstract class MixinLevelPropagator implements LevelUpdateListener, Level
     protected abstract int getPropagatedLevel(long sourceId, long targetId, int level);
 
     @Shadow
+    protected abstract void updateLevel(long sourceId, long id, int level, boolean decrease);
+
+    @Shadow
     protected abstract void updateLevel(long sourceId, long id, int level, int currentLevel, int pendingLevel, boolean decrease);
 
     @Override
